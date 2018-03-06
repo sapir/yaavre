@@ -1,3 +1,7 @@
+extern crate regex;
+extern crate hex;
+
+
 pub mod registers;
 pub mod emulator;
 pub mod sreg;
