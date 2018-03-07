@@ -8,7 +8,7 @@ pub struct SReg {
     pub s : bool,
     pub h : bool,
     pub t : bool,
-    pub i : bool,    
+    pub i : bool,
 }
 
 impl SReg {

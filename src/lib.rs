@@ -1,5 +1,10 @@
+#![feature(advanced_slice_patterns, slice_patterns)]
+
 extern crate regex;
 extern crate hex;
+
+#[macro_use]
+extern crate lazy_static;
 
 
 pub mod registers;

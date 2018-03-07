@@ -6,3 +6,4 @@ authors = ["Y. Sapir <yasapir@gmail.com>"]
 [dependencies]
 regex = "0.2"
 hex = "0.3.1"
+lazy_static = "1.0"
