@@ -7,3 +7,4 @@ authors = ["Y. Sapir <yasapir@gmail.com>"]
 regex = "0.2"
 hex = "0.3.1"
 lazy_static = "1.0"
+signal-notify = "0.1.3"

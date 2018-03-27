@@ -6,6 +6,8 @@ extern crate hex;
 #[macro_use]
 extern crate lazy_static;
 
+extern crate signal_notify;
+
 
 pub mod registers;
 pub mod emulator;

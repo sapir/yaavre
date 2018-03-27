@@ -7,6 +7,8 @@ use regex::Regex;
 use hex;
 use iomem::IOMemory;
 use registers;
+use std::sync::mpsc;
+use signal_notify::{notify, Signal};
 
 
 #[derive(Debug, Copy, Clone)]
@@ -60,10 +62,16 @@ pub struct Emulator {
 
     pub insn_count: u64,
     // TODO: cycle_count
+
+    pub halted: bool,
+
+    sig_chan: mpsc::Receiver<Signal>,
 }
 
 impl Emulator {
     pub fn new() -> Emulator {
+        let sig_chan = notify(&[Signal::USR1]);
+
         Emulator {
             prog_mem: vec![0; 1 << 22],
             pmem_asm: HashMap::new(),
@@ -76,6 +84,10 @@ impl Emulator {
             skip_next_insn: false,
 
             insn_count: 0,
+
+            halted: false,
+
+            sig_chan: sig_chan,
         }
     }
 
@@ -85,6 +97,7 @@ impl Emulator {
         self.call_stack = vec![];
         self.skip_next_insn = false;
         self.insn_count = 0;
+        self.halted = false;
     }
 
     pub fn fmt_call_stack(&self) -> String {
@@ -261,13 +274,17 @@ impl Emulator {
     }
 
     pub fn run(&mut self) {
-        loop {
+        self.halted = false;
+        while !self.halted {
             self._step();
         }
+
+        self.print_state();
     }
 
     pub fn until(&mut self, pc: usize) {
-        loop {
+        self.halted = false;
+        while !self.halted {
             self._step();
             if self.pc == pc {
                 break;
@@ -299,6 +316,11 @@ impl Emulator {
     }
 
     fn _step(&mut self) {
+        match self.sig_chan.try_recv() {
+            Ok(_) => self.print_state(),
+            _ => (),
+        }
+
         let mut next_pc;
         let opcode;
         let operands;
