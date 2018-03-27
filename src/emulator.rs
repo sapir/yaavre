@@ -462,7 +462,14 @@ impl Emulator {
 
             ("jmp", &[Operand::Imm(tgt)]) => *next_pc = tgt,
 
-            ("rjmp", &[Operand::Imm(tgt)]) => *next_pc = tgt,
+            ("rjmp", &[Operand::Imm(tgt)]) => {
+                // catch "__stop_program"
+                if tgt == self.pc && !self.io_mem.sreg.i {
+                    self.halted = true;
+                }
+
+                *next_pc = tgt;
+            }
 
             ("eijmp", &[]) => *next_pc = self.io_mem.get_full_ind() << 1,
 
