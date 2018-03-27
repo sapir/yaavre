@@ -25,6 +25,11 @@ pub struct IOMemory {
     pub sreg: SReg,
 
     pub data_mem: Vec<u8>,
+
+    pub usart_input: Vec<u8>,
+    pub usart_output_log: Vec<u8>,
+
+    pub rtc_cnt : u16,
 }
 
 impl IOMemory {
@@ -33,6 +38,11 @@ impl IOMemory {
             regs: RegisterFile::new(),
             sreg: SReg::new(),
             data_mem: vec![0; 1 << 22],
+
+            usart_input: vec![],
+            usart_output_log: vec![],
+
+            rtc_cnt: 0,
         }
     }
 
@@ -129,26 +139,57 @@ impl IOMemory {
         self.data_mem[addr] = val;
     }
 
-    pub fn get8(&self, addr: usize) -> u8 {
-        // TODO: hooks etc., don't hard-code legit addrs
-        if addr < 0x2000 && (addr < 0x38 || addr > 0x3f) {
-            println!("TODO: io read from {:#x}", addr);
-          //  0
-        } //else {
-            self._get8(addr)
-        //}
+    pub fn get8(&mut self, addr: usize) -> u8 {
+        match addr {
+            // oscillator status = ready
+            0x0051 => 0xff,
+
+            // rtc
+            0x0401 => 0,
+            0x0408 => {
+                self.rtc_cnt += 1000;
+                (self.rtc_cnt & 0xff) as u8
+            },
+            0x0409 => (self.rtc_cnt >> 8) as u8,
+
+            0x08a0 => self.usart_input.remove(0),
+            0x08a1 => 0x20 | (if self.usart_input.is_empty() { 0 } else { 0x80 }),
+
+            // simple IO regs
+            0x38...0x3f => self._get8(addr),
+
+            // data memory
+            0x2000...0x1000000 => self._get8(addr),
+
+            _ => {
+                println!("TODO: io read from {:#x}", addr);
+                0
+            }
+        }
     }
 
     pub fn set8(&mut self, addr: usize, val: u8) {
-        // TODO: hooks etc., don't hard-code legit addrs
-        if addr < 0x2000 && (addr < 0x38 || addr > 0x3f) {
-            println!("TODO: io write to {:#x} = {:#x}", addr, val);
-        } //else {
-            self._set8(addr, val);
-        //}
+        match addr {
+            0x08a0 => {
+                self.usart_output_log.push(val);
+                if val.is_ascii_whitespace() || val.is_ascii_graphic() {
+                    print!("{}", val as char);
+                }
+            }
+
+            // simple IO regs
+            0x38...0x3f => self._set8(addr, val),
+
+            // data memory
+            0x2000...0x1000000 => self._set8(addr, val),
+
+            _ => {
+                println!("TODO: io write to {:#x} = {:#x}", addr, val);
+            }
+        }
     }
 
-    pub fn get16(&self, addr: usize) -> u16 {
+    pub fn get16(&mut self, addr: usize) -> u16 {
         ((self.get8(addr + 1) as u16) << 8) | (self.get8(addr) as u16)
     }
 
