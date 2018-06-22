@@ -156,7 +156,9 @@ impl IOMemory {
             0x08a1 => 0x20 | (if self.usart_input.is_empty() { 0 } else { 0x80 }),
 
             // simple IO regs
-            0x38...0x3f => self._get8(addr),
+            0x38...0x3e => self._get8(addr),
+
+            SREG => self.sreg.as_u8(),
 
             // data memory
             0x2000...0x1000000 => self._get8(addr),
@@ -178,7 +180,9 @@ impl IOMemory {
             }
 
             // simple IO regs
-            0x38...0x3f => self._set8(addr, val),
+            0x38...0x3e => self._set8(addr, val),
+
+            SREG => self.sreg.set_u8(val),
 
             // data memory
             0x2000...0x1000000 => self._set8(addr, val),
