@@ -129,7 +129,7 @@ impl Emulator {
         let mut buffer = vec![];
         f.read_to_end(&mut buffer)?;
 
-        self.prog_mem.set_bytes(&buffer);
+        self.prog_mem.set_bytes(&buffer)?;
 
         Ok(())
     }

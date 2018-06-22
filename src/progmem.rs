@@ -1,5 +1,5 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use std::io::Cursor;
+use std::io::{Cursor, Result};
 use disa::AvrInsn;
 
 
@@ -12,11 +12,11 @@ impl ProgramMemory {
         ProgramMemory { words: vec!() }
     }
 
-    pub fn set_bytes(&mut self, bytes: &[u8]) {
+    pub fn set_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         self.words = vec![0; bytes.len() / 2];
 
         let mut rdr = Cursor::new(bytes);
-        rdr.read_u16_into::<LittleEndian>(&mut self.words).unwrap();
+        rdr.read_u16_into::<LittleEndian>(&mut self.words)
     }
 
     pub fn get_prog_mem_byte(&self, addr: u32, call_stack: &str, pc: u32)
