@@ -4,8 +4,8 @@ version = "0.1.0"
 authors = ["Y. Sapir <yasapir@gmail.com>"]
 
 [dependencies]
-regex = "0.2"
 hex = "0.3.1"
-lazy_static = "1.0"
 clap = "2.31"
 signal-notify = "0.1.3"
+disa = { git = "git://github.com/sapir/disa" }
+byteorder = "1.2.3"

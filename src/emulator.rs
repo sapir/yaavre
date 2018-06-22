@@ -1,62 +1,20 @@
 use std::fs::File;
-use std::result::Result;
 use std::io;
-use std::io::{Read, BufReader, BufRead};
-use std::collections::HashMap;
-use regex::Regex;
+use std::io::{Read, Cursor};
 use hex;
 use iomem::IOMemory;
-use registers;
 use std::sync::mpsc;
 use signal_notify::{notify, Signal};
-
-
-#[derive(Debug, Copy, Clone)]
-pub enum Operand {
-    Reg(usize),
-    Imm(usize),
-    MemAccess { reg: usize, ofs: isize, postinc: bool, predec: bool },
-}
-
-impl Operand {
-    pub fn to_string(&self) -> String {
-        match *self {
-            Operand::Reg(num) => format!("r{}", num),
-            Operand::Imm(x) => format!("{:#x}", x),
-            Operand::MemAccess{ reg, ofs, postinc, predec } =>
-                format!("{}{}{}{}",
-                    if predec { "-" } else { "" },
-                    match reg {
-                        registers::X => String::from("X"),
-                        registers::Y => String::from("Y"),
-                        registers::Z => String::from("Z"),
-                        _ => format!("r{}", reg)
-                    },
-                    if ofs != 0 {
-                        format!("{:+}", ofs)
-                    } else {
-                        String::from("")
-                    },
-                    if postinc { "+" } else { "" },
-                ),
-        }
-    }
-}
-
-
-lazy_static! {
-    static ref MEM_ACCESS_REGEX : Regex =
-        Regex::new(r"^(-)?([XYZ])(?:(\+)|([-+]\d+)|$)$").unwrap();
-}
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use disa::{AvrInsn, Reg, RegPair, MemAccess, MemRegUpdate};
 
 
 pub struct Emulator {
-    pub prog_mem: Vec<u8>,
-    pub pmem_asm: HashMap<usize, (Vec<u8>, String, Vec<Operand>)>,
+    pub prog_mem: Vec<u16>,
     pub io_mem: IOMemory,
-    pub pc: usize,
+    pub pc: u32,
 
-    pub call_stack: Vec<(u16, usize, usize)>,
+    pub call_stack: Vec<(u16, u32, u32)>,
 
     pub skip_next_insn: bool,
 
@@ -73,8 +31,7 @@ impl Emulator {
         let sig_chan = notify(&[Signal::USR1]);
 
         Emulator {
-            prog_mem: vec![0; 1 << 22],
-            pmem_asm: HashMap::new(),
+            prog_mem: vec![0; 1 << (22 - 1)],
 
             io_mem: IOMemory::new(),
             pc: 0,
@@ -110,21 +67,30 @@ impl Emulator {
         format!("[{}]", frame_strings.join(", "))
     }
 
+    fn get_prog_mem_byte(&self, addr: u32) -> u8 {
+        let pmem_index = (addr / 2) as usize;
+        let word = self.prog_mem[pmem_index];
+
+        let mut bytes: [u8; 2] = [0; 2];
+        (&mut bytes[..]).write_u16::<LittleEndian>(word).unwrap();
+
+        bytes[(addr & 1) as usize]
+    }
+
+    fn get_insn_at(&self, addr: u32) -> Option<AvrInsn> {
+        let pmem_index = (addr / 2) as usize;
+        let decode_input = &self.prog_mem[pmem_index..];
+        AvrInsn::decode(decode_input).map(|(_, insn)| insn)
+    }
+
+    fn get_cur_insn(&self) -> Option<AvrInsn> {
+        self.get_insn_at(self.pc)
+    }
+
     pub fn print_state(&self) {
-        let insn = match self.pmem_asm.get(&self.pc) {
-            Some(&(_, ref opcode, ref operands)) =>
-                format!("{} {}", opcode, {
-                    let op_strs : Vec<String> = operands
-                        .into_iter()
-                        .map(|op| op.to_string())
-                        .collect();
-                    op_strs.join(", ")
-                }),
+        let insn = self.get_cur_insn();
 
-            None => String::from("???")
-        };
-
-        println!("{:#06x}:  {}", self.pc, insn);
+        println!("{:#06x}:  {:?}", self.pc, insn);
         println!();
 
         let sreg_chars = [
@@ -178,97 +144,11 @@ impl Emulator {
         let mut f = File::open(path)?;
         let mut buffer = vec![];
         f.read_to_end(&mut buffer)?;
-        self.prog_mem[..buffer.len()].clone_from_slice(&buffer);
-        Ok(())
-    }
 
-    fn parse_operand(op_str: &str, next_pc: usize) -> Operand {
-        let mut cs = op_str.chars();
-        let first = cs.nth(0).unwrap();
-        let rest = &op_str[1..];
+        self.prog_mem = vec![0; buffer.len() / 2];
 
-        match first {
-            'r' => Operand::Reg(rest.parse::<usize>().unwrap()),
-
-            '.' => {
-                let ofs = rest.parse::<isize>().unwrap();
-                Operand::Imm(next_pc.wrapping_add(ofs as usize))
-            },
-
-            '0'...'9' => Operand::Imm(
-                if op_str.starts_with("0x") {
-                    usize::from_str_radix(&op_str[2..], 16).unwrap()
-                } else {
-                    usize::from_str_radix(op_str, 10).unwrap()
-                }
-            ),
-
-            '-' | 'X' ... 'Z' => {
-                let caps = MEM_ACCESS_REGEX.captures(op_str).unwrap();
-
-                let predec = caps.get(1).is_some();
-
-                let reg = match &caps[2] {
-                    "X" => registers::X,
-                    "Y" => registers::Y,
-                    "Z" => registers::Z,
-                    _ => unreachable!()
-                };
-
-                let postinc = caps.get(3).is_some();
-
-                let ofs = match caps.get(4) {
-                    Some(s) => s.as_str().parse::<isize>().unwrap(),
-                    None => 0
-                };
-
-                Operand::MemAccess { reg, ofs, postinc, predec }
-            }
-
-            _ => panic!(format!("bad operand! {}", op_str))
-        }
-    }
-
-    pub fn load_disasm(&mut self, path: &str) -> Result<(), String> {
-        let f = File::open(path).map_err(|e| e.to_string())?;
-        let reader = BufReader::new(f);
-
-        let line_re = Regex::new(
-            r"^\s*([0-9a-f]+):\s+([0-9a-f ]+)\t([^;]+)"
-        ).map_err(|e| e.to_string())?;
-
-        for line in reader.lines() {
-            let line = line.map_err(|e| e.to_string())?;
-            let caps = line_re.captures(&line);
-            if caps.is_none() {
-                continue;
-            }
-
-            let caps = caps.unwrap();
-            let addr = usize::from_str_radix(&caps[1], 16)
-                .map_err(|e| e.to_string())?;
-            let insn_bytes = hex::decode(
-                &caps[2].replace(" ", "")
-            ).map_err(|e| e.to_string())?;
-            let asm = &caps[3].trim();
-
-            let asm_parts : Vec<&str> = asm.split("\t").collect();
-
-            let opcode = asm_parts[0].to_string();
-
-            let next_pc = addr + insn_bytes.len();
-
-            let op_strs =
-                if asm_parts.len() > 1 {
-                    asm_parts[1].split(",")
-                        .map(|op| Emulator::parse_operand(op.trim(), next_pc))
-                        .collect()
-                } else {
-                    vec![]
-                };
-
-            self.pmem_asm.insert(addr, (insn_bytes, opcode, op_strs));
-        }
+        let mut rdr = Cursor::new(buffer);
+        rdr.read_u16_into::<LittleEndian>(&mut self.prog_mem)?;
 
         Ok(())
     }
@@ -282,7 +162,7 @@ impl Emulator {
         self.print_state();
     }
 
-    pub fn until(&mut self, pc: usize) {
+    pub fn until(&mut self, pc: u32) {
         self.halted = false;
         while !self.halted {
             self._step();
@@ -299,19 +179,19 @@ impl Emulator {
         self.print_state();
     }
 
-    pub fn get_reg8(&self, r: usize) -> u8 {
+    pub fn get_reg8(&self, r: u8) -> u8 {
         self.io_mem.regs.get8(r)
     }
 
-    pub fn set_reg8(&mut self, r: usize, val: u8) {
+    pub fn set_reg8(&mut self, r: u8, val: u8) {
         self.io_mem.regs.set8(r, val);
     }
 
-    pub fn get_reg16(&self, r: usize) -> u16 {
+    pub fn get_reg16(&self, r: u8) -> u16 {
         self.io_mem.regs.get16(r)
     }
 
-    pub fn set_reg16(&mut self, r: usize, val: u16) {
+    pub fn set_reg16(&mut self, r: u8, val: u16) {
         self.io_mem.regs.set16(r, val);
     }
 
@@ -321,23 +201,13 @@ impl Emulator {
             _ => (),
         }
 
-        let mut next_pc;
-        let opcode;
-        let operands;
-
-        {
-            let (ref insn_bytes, ref opcode_, ref operands_) =
-                self.pmem_asm[&self.pc];
-
-            next_pc = self.pc + insn_bytes.len();
-            opcode = opcode_.clone();
-            operands = operands_.clone();
-        }
+        let insn = self.get_cur_insn().unwrap();
+        let mut next_pc = self.pc + (insn.byte_size() as u32);
 
         if self.skip_next_insn {
             self.skip_next_insn = false;
         } else {
-            self.do_opcode(&*opcode, operands, &mut next_pc);
+            self.do_opcode(&insn, &mut next_pc);
         }
 
         self.pc = next_pc;
@@ -421,16 +291,16 @@ impl Emulator {
         if self.io_mem.sreg.c { 1 } else { 0 }
     }
 
-    fn push_ret_addr(&mut self, ret_addr: usize, call_tgt: usize) {
+    fn push_ret_addr(&mut self, ret_addr: u32, call_tgt: u32) {
         self.call_stack.push((self.io_mem.get_sp(), self.pc, call_tgt));
 
         let ret_addr = ret_addr >> 1;
 
         // TODO: if !has_22bit_addrs, push16
-        self.io_mem.push24(ret_addr as u32);
+        self.io_mem.push24(ret_addr);
     }
 
-    fn pop_ret_addr(&mut self) -> usize {
+    fn pop_ret_addr(&mut self) -> u32 {
         // TODO: if !has_22bit_addrs, pop16
         let mut ret_addr = self.io_mem.pop24();
 
@@ -445,167 +315,218 @@ impl Emulator {
             self.call_stack.pop();
         }
 
-        ret_addr as usize
+        ret_addr
     }
 
-    fn do_call(&mut self, next_pc: &mut usize, call_tgt: usize) {
+    fn do_call(&mut self, next_pc: &mut u32, call_tgt: u32) {
         let ret_addr = *next_pc;
         self.push_ret_addr(ret_addr, call_tgt);
         *next_pc = call_tgt;
     }
 
-    fn do_opcode(&mut self, opcode: &str, operands: Vec<Operand>,
-            next_pc: &mut usize)
-    {
-        match (opcode, operands.as_slice()) {
-            ("nop", &[]) => {},
+    // does the pre-update and returns the address
+    fn do_pre_mem_access(&mut self, mema: MemAccess, full_reg: bool) -> u32 {
+        let MemAccess { reg_pair, ofs, update } = mema;
 
-            ("jmp", &[Operand::Imm(tgt)]) => *next_pc = tgt,
+        let base_addr =
+            if full_reg {
+                let mut val = self.io_mem.get_full_reg(reg_pair.0);
 
-            ("rjmp", &[Operand::Imm(tgt)]) => {
+                if update == MemRegUpdate::PreDec {
+                    // TODO: incorrect overflow handling
+                    val -= 1;
+                    self.io_mem.set_full_reg(reg_pair.0, val);
+                }
+
+                val
+            } else {
+                let mut val = self.get_reg16(reg_pair.0);
+
+                if update == MemRegUpdate::PreDec {
+                    // TODO: incorrect overflow handling
+                    val -= 1;
+                    self.set_reg16(reg_pair.0, val);
+                }
+
+                val as u32
+            };
+
+        // TODO: incorrect overflow handling
+        base_addr + (ofs as u32)
+    }
+
+    fn do_post_mem_access(&mut self, mema: MemAccess, full_reg: bool) {
+        let MemAccess { reg_pair, ofs: _, update } = mema;
+
+        if full_reg {
+            if update == MemRegUpdate::PostInc {
+                let val = self.get_reg16(reg_pair.0);
+                self.set_reg16(reg_pair.0, val + 1);
+            }
+        } else {
+            if update == MemRegUpdate::PostInc {
+                let val = self.io_mem.get_full_reg(reg_pair.0);
+                self.io_mem.set_full_reg(reg_pair.0, val + 1);
+            }
+        }
+    }
+
+    fn get_rel_jmp_target(&self, next_pc: u32, ofs: i16) -> u32 {
+        next_pc.wrapping_add(ofs as i32 as u32)
+    }
+
+    fn do_opcode(&mut self, insn: &AvrInsn, next_pc: &mut u32) {
+        match insn {
+            &AvrInsn::Nop => {},
+
+            &AvrInsn::Jmp(tgt) => *next_pc = tgt,
+
+            &AvrInsn::Rjmp(ofs) => {
                 // catch "__stop_program"
-                if tgt == self.pc && !self.io_mem.sreg.i {
+                if ofs == -2 && !self.io_mem.sreg.i {
                     self.halted = true;
                 }
 
-                *next_pc = tgt;
+                *next_pc = self.get_rel_jmp_target(*next_pc, ofs);
             }
 
-            ("eijmp", &[]) => *next_pc = self.io_mem.get_full_ind() << 1,
+            &AvrInsn::Eijmp => *next_pc = self.io_mem.get_full_ind() << 1,
 
-            ("call", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Call(tgt) =>
                 self.do_call(next_pc, tgt),
 
-            ("rcall", &[Operand::Imm(tgt)]) =>
-                self.do_call(next_pc, tgt),
+            &AvrInsn::Rcall(ofs) => {
+                let tgt = self.get_rel_jmp_target(*next_pc, ofs);
+                self.do_call(next_pc, tgt);
+            },
 
-            ("eicall", &[]) => {
+            &AvrInsn::Eicall => {
                 let tgt = self.io_mem.get_full_ind() << 1;
                 self.do_call(next_pc, tgt);
             },
 
-            ("ret", &[]) => *next_pc = self.pop_ret_addr(),
+            &AvrInsn::Ret => *next_pc = self.pop_ret_addr(),
 
-            ("reti", &[]) => {
+            &AvrInsn::Reti => {
                 self.io_mem.sreg.i = true;
                 *next_pc = self.pop_ret_addr();
             },
 
-            ("push", &[Operand::Reg(rr)]) => {
+            &AvrInsn::Push(Reg(rr)) => {
                 let val = self.get_reg8(rr);
                 self.io_mem.push8(val);
             }
 
-            ("pop", &[Operand::Reg(rd)]) => {
+            &AvrInsn::Pop(Reg(rd)) => {
                 let val = self.io_mem.pop8();
                 self.set_reg8(rd, val);
             }
 
-            ("breq", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Breq(ofs) =>
                 if self.io_mem.sreg.z {
-                    *next_pc = tgt;
+                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
                 },
 
-            ("brne", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Brne(ofs) =>
                 if !self.io_mem.sreg.z {
-                    *next_pc = tgt;
+                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
                 },
 
-            ("brcc", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Brcc(ofs) =>
                 if !self.io_mem.sreg.c {
-                    *next_pc = tgt;
+                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
                 },
 
-            ("brcs", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Brcs(ofs) =>
                 if self.io_mem.sreg.c {
-                    *next_pc = tgt;
+                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
                 },
 
-            ("brge", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Brge(ofs) =>
                 if !(self.io_mem.sreg.n ^ self.io_mem.sreg.v) {
-                    *next_pc = tgt;
+                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
                 },
 
-            ("brlt", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Brlt(ofs) =>
                 if self.io_mem.sreg.n ^ self.io_mem.sreg.v {
-                    *next_pc = tgt;
+                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
                 },
 
-            ("brmi", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Brmi(ofs) =>
                 if self.io_mem.sreg.n {
-                    *next_pc = tgt;
+                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
                 },
 
-            ("brpl", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Brpl(ofs) =>
                 if !self.io_mem.sreg.n {
-                    *next_pc = tgt;
+                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
                 },
 
-            ("brtc", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Brtc(ofs) =>
                 if !self.io_mem.sreg.t {
-                    *next_pc = tgt;
+                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
                 },
 
-            ("brts", &[Operand::Imm(tgt)]) =>
+            &AvrInsn::Brts(ofs) =>
                 if self.io_mem.sreg.t {
-                    *next_pc = tgt;
+                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
                 },
 
-            ("sbrc", &[Operand::Reg(rr), Operand::Imm(bit)]) => {
+            &AvrInsn::Sbrc(Reg(rr), bit) => {
                 let rr_val = self.get_reg8(rr);
                 self.skip_next_insn = (rr_val & (1 << bit)) == 0;
             },
 
-            ("sbrs", &[Operand::Reg(rr), Operand::Imm(bit)]) => {
+            &AvrInsn::Sbrs(Reg(rr), bit) => {
                 let rr_val = self.get_reg8(rr);
                 self.skip_next_insn = (rr_val & (1 << bit)) != 0;
             },
 
-            ("cpse", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Cpse(Reg(rd), Reg(rr)) => {
                 let rd_val = self.get_reg8(rd);
                 let rr_val = self.get_reg8(rr);
                 self.skip_next_insn = rd_val == rr_val;
             },
 
-            ("clc", &[]) => self.io_mem.sreg.c = false,
+            &AvrInsn::Clc => self.io_mem.sreg.c = false,
 
-            ("clh", &[]) => self.io_mem.sreg.h = false,
+            &AvrInsn::Clh => self.io_mem.sreg.h = false,
 
-            ("cli", &[]) => self.io_mem.sreg.i = false,
+            &AvrInsn::Cli => self.io_mem.sreg.i = false,
 
-            ("cln", &[]) => self.io_mem.sreg.n = false,
+            &AvrInsn::Cln => self.io_mem.sreg.n = false,
 
-            ("cls", &[]) => self.io_mem.sreg.s = false,
+            &AvrInsn::Cls => self.io_mem.sreg.s = false,
 
-            ("clt", &[]) => self.io_mem.sreg.t = false,
+            &AvrInsn::Clt => self.io_mem.sreg.t = false,
 
-            ("clv", &[]) => self.io_mem.sreg.v = false,
+            &AvrInsn::Clv => self.io_mem.sreg.v = false,
 
-            ("clz", &[]) => self.io_mem.sreg.z = false,
+            &AvrInsn::Clz => self.io_mem.sreg.z = false,
 
-            ("sec", &[]) => self.io_mem.sreg.c = true,
+            &AvrInsn::Sec => self.io_mem.sreg.c = true,
 
-            ("seh", &[]) => self.io_mem.sreg.h = true,
+            &AvrInsn::Seh => self.io_mem.sreg.h = true,
 
-            ("sei", &[]) => self.io_mem.sreg.i = true,
+            &AvrInsn::Sei => self.io_mem.sreg.i = true,
 
-            ("sen", &[]) => self.io_mem.sreg.n = true,
+            &AvrInsn::Sen => self.io_mem.sreg.n = true,
 
-            ("ses", &[]) => self.io_mem.sreg.s = true,
+            &AvrInsn::Ses => self.io_mem.sreg.s = true,
 
-            ("set", &[]) => self.io_mem.sreg.t = true,
+            &AvrInsn::Set => self.io_mem.sreg.t = true,
 
-            ("sev", &[]) => self.io_mem.sreg.v = true,
+            &AvrInsn::Sev => self.io_mem.sreg.v = true,
 
-            ("sez", &[]) => self.io_mem.sreg.z = true,
+            &AvrInsn::Sez => self.io_mem.sreg.z = true,
 
-            ("bst", &[Operand::Reg(rr), Operand::Imm(bit)]) => {
+            &AvrInsn::Bst(Reg(rr), bit) => {
                 let bit_val = (1 << bit) as u8;
                 let rr_val = self.get_reg8(rr);
                 self.io_mem.sreg.t = (rr_val & bit_val) != 0;
             },
 
-            ("bld", &[Operand::Reg(rd), Operand::Imm(bit)]) => {
+            &AvrInsn::Bld(Reg(rd), bit) => {
                 let bit_val = (1 << bit) as u8;
 
                 let mut val = self.get_reg8(rd);
@@ -618,69 +539,70 @@ impl Emulator {
                 self.set_reg8(rd, val);
             },
 
-            ("clr", &[Operand::Reg(rd)]) => self.set_reg8(rd, 0),
+            // TODO:
+            // &AvrInsn::Clr(Reg(rd)) => self.set_reg8(rd, 0),
 
-            ("ser", &[Operand::Reg(rd)]) => self.set_reg8(rd, 0xff),
+            // &AvrInsn::Ser(Reg(rd)) => self.set_reg8(rd, 0xff),
 
-            ("ldi", &[Operand::Reg(rd), Operand::Imm(k)]) => {
+            &AvrInsn::Ldi(Reg(rd), k) => {
                 self.set_reg8(rd, k as u8);
             },
 
-            ("mov", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Mov(Reg(rd), Reg(rr)) => {
                 let val = self.get_reg8(rr);
                 self.set_reg8(rd, val);
             },
 
-            ("movw", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Movw(RegPair(rd), RegPair(rr)) => {
                 let val = self.get_reg16(rr);
                 self.set_reg16(rd, val);
             },
 
-            ("andi", &[Operand::Reg(rd), Operand::Imm(k)]) => {
+            &AvrInsn::Andi(Reg(rd), k) => {
                 let r_val = self.get_reg8(rd) & (k as u8);
                 self.set_reg8(rd, r_val);
                 self.set_sreg_for_bits(r_val);
             },
 
-            ("ori", &[Operand::Reg(rd), Operand::Imm(k)]) => {
+            &AvrInsn::Ori(Reg(rd), k) => {
                 let r_val = self.get_reg8(rd) | (k as u8);
                 self.set_reg8(rd, r_val);
                 self.set_sreg_for_bits(r_val);
             },
 
-            ("and", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::And(Reg(rd), Reg(rr)) => {
                 let r_val = self.get_reg8(rd) & self.get_reg8(rr);
                 self.set_reg8(rd, r_val);
                 self.set_sreg_for_bits(r_val);
             },
 
-            ("or", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Or(Reg(rd), Reg(rr)) => {
                 let r_val = self.get_reg8(rd) | self.get_reg8(rr);
                 self.set_reg8(rd, r_val);
                 self.set_sreg_for_bits(r_val);
             },
 
-            ("eor", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Eor(Reg(rd), Reg(rr)) => {
                 let r_val = self.get_reg8(rd) ^ self.get_reg8(rr);
                 self.set_reg8(rd, r_val);
                 self.set_sreg_for_bits(r_val);
             },
 
-            ("lsr", &[Operand::Reg(rd)]) => {
+            &AvrInsn::Lsr(Reg(rd)) => {
                 let val_before = self.get_reg8(rd);
                 let val_after = val_before >> 1;
                 self.set_sreg_for_shift(val_before, val_after);
                 self.set_reg8(rd, val_after);
             },
 
-            ("asr", &[Operand::Reg(rd)]) => {
+            &AvrInsn::Asr(Reg(rd)) => {
                 let val_before = self.get_reg8(rd);
                 let val_after = (val_before & 0x80) | val_before >> 1;
                 self.set_sreg_for_shift(val_before, val_after);
                 self.set_reg8(rd, val_after);
             },
 
-            ("ror", &[Operand::Reg(rd)]) => {
+            &AvrInsn::Ror(Reg(rd)) => {
                 let val_before = self.get_reg8(rd);
 
                 let mut val_after = val_before >> 1;
@@ -692,12 +614,12 @@ impl Emulator {
                 self.set_reg8(rd, val_after);
             },
 
-            ("swap", &[Operand::Reg(rd)]) => {
+            &AvrInsn::Swap(Reg(rd)) => {
                 let n = self.get_reg8(rd);
                 self.set_reg8(rd, ((n & 0xf0) >> 4) | ((n & 0x0f) << 4));
             },
 
-            ("add", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Add(Reg(rd), Reg(rr)) => {
                 let rd_val = self.get_reg8(rd);
                 let rr_val = self.get_reg8(rr);
                 let r_val = rd_val.wrapping_add(rr_val);
@@ -705,7 +627,7 @@ impl Emulator {
                 self.set_reg8(rd, r_val);
             },
 
-            ("adc", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Adc(Reg(rd), Reg(rr)) => {
                 let rd_val = self.get_reg8(rd);
                 let rr_val = self.get_reg8(rr);
                 let r_val = rd_val.wrapping_add(rr_val)
@@ -714,21 +636,21 @@ impl Emulator {
                 self.set_reg8(rd, r_val);
             },
 
-            ("cp", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Cp(Reg(rd), Reg(rr)) => {
                 let rd_val = self.get_reg8(rd);
                 let rr_val = self.get_reg8(rr);
                 let r_val = rd_val.wrapping_sub(rr_val);
                 self.set_sreg_for_sub(rd_val, rr_val, r_val, false);
             },
 
-            ("cpi", &[Operand::Reg(rd), Operand::Imm(k)]) => {
+            &AvrInsn::Cpi(Reg(rd), k) => {
                 let rd_val = self.get_reg8(rd);
                 let k = k as u8;
                 let r_val = rd_val.wrapping_sub(k);
                 self.set_sreg_for_sub(rd_val, k, r_val, false);
             },
 
-            ("cpc", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Cpc(Reg(rd), Reg(rr)) => {
                 let rd_val = self.get_reg8(rd);
                 let rr_val = self.get_reg8(rr);
                 let r_val = rd_val.wrapping_sub(rr_val)
@@ -736,7 +658,7 @@ impl Emulator {
                 self.set_sreg_for_sub(rd_val, rr_val, r_val, true);
             },
 
-            ("sub", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Sub(Reg(rd), Reg(rr)) => {
                 let rd_val = self.get_reg8(rd);
                 let rr_val = self.get_reg8(rr);
                 let r_val = rd_val.wrapping_sub(rr_val);
@@ -744,7 +666,7 @@ impl Emulator {
                 self.set_reg8(rd, r_val);
             },
 
-            ("subi", &[Operand::Reg(rd), Operand::Imm(k)]) => {
+            &AvrInsn::Subi(Reg(rd), k) => {
                 let rd_val = self.get_reg8(rd);
                 let k = k as u8;
                 let r_val = rd_val.wrapping_sub(k);
@@ -752,7 +674,7 @@ impl Emulator {
                 self.set_reg8(rd, r_val);
             },
 
-            ("sbc", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Sbc(Reg(rd), Reg(rr)) => {
                 let rd_val = self.get_reg8(rd);
                 let rr_val = self.get_reg8(rr);
                 let r_val = rd_val.wrapping_sub(rr_val)
@@ -762,7 +684,7 @@ impl Emulator {
                 self.set_reg8(rd, r_val);
             },
 
-            ("sbci", &[Operand::Reg(rd), Operand::Imm(k)]) => {
+            &AvrInsn::Sbci(Reg(rd), k) => {
                 let rd_val = self.get_reg8(rd);
                 let k = k as u8;
                 let r_val = rd_val.wrapping_sub(k)
@@ -771,7 +693,7 @@ impl Emulator {
                 self.set_reg8(rd, r_val);
             },
 
-            ("adiw", &[Operand::Reg(rd), Operand::Imm(k)]) => {
+            &AvrInsn::Adiw(RegPair(rd), k) => {
                 let rdw_val = self.get_reg16(rd);
                 let kw_val = k as u16;
                 let r_val = rdw_val.wrapping_add(kw_val);
@@ -785,7 +707,7 @@ impl Emulator {
                 sreg.s = sreg.n ^ sreg.v;
             },
 
-            ("sbiw", &[Operand::Reg(rd), Operand::Imm(k)]) => {
+            &AvrInsn::Sbiw(RegPair(rd), k) => {
                 let rdw_val = self.get_reg16(rd);
                 let kw_val = k as u16;
                 let r_val = rdw_val.wrapping_sub(kw_val);
@@ -799,7 +721,7 @@ impl Emulator {
                 sreg.s = sreg.n ^ sreg.v;
             },
 
-            ("inc", &[Operand::Reg(rd)]) => {
+            &AvrInsn::Inc(Reg(rd)) => {
                 let rd_val = self.get_reg8(rd);
                 let r_val = rd_val.wrapping_add(1);
 
@@ -812,7 +734,7 @@ impl Emulator {
                 sreg.s = sreg.n ^ sreg.v;
             },
 
-            ("dec", &[Operand::Reg(rd)]) => {
+            &AvrInsn::Dec(Reg(rd)) => {
                 let rd_val = self.get_reg8(rd);
                 let r_val = rd_val.wrapping_sub(1);
 
@@ -826,7 +748,7 @@ impl Emulator {
             },
 
             // TODO: verify sreg
-            ("com", &[Operand::Reg(rd)]) => {
+            &AvrInsn::Com(Reg(rd)) => {
                 let rd_val = self.get_reg8(rd);
                 let r_val = 0xff - rd_val;
 
@@ -841,7 +763,7 @@ impl Emulator {
             },
 
             // TODO: verify sreg
-            ("neg", &[Operand::Reg(rd)]) => {
+            &AvrInsn::Neg(Reg(rd)) => {
                 let rd_val = self.get_reg8(rd);
                 let r_val = (-(rd_val as i8)) as u8;
 
@@ -856,7 +778,7 @@ impl Emulator {
                 sreg.s = sreg.n ^ sreg.v;
             },
 
-            ("mul", &[Operand::Reg(rd), Operand::Reg(rr)]) => {
+            &AvrInsn::Mul(Reg(rd), Reg(rr)) => {
                 let rd_val = self.get_reg8(rd);
                 let rr_val = self.get_reg8(rr);
                 let r_val = (rd_val as u16) * (rr_val as u16);
@@ -867,117 +789,74 @@ impl Emulator {
                 sreg.z = r_val == 0;
             },
 
-            ("in", &[Operand::Reg(rd), Operand::Imm(port)]) => {
+            &AvrInsn::In(Reg(rd), port) => {
                 let call_stack = self.fmt_call_stack();
-                let val = self.io_mem.get8(port, &call_stack, self.pc);
+                let val = self.io_mem.get8(port as u32, &call_stack, self.pc);
                 self.set_reg8(rd, val);
             },
 
-            ("out", &[Operand::Imm(port), Operand::Reg(rr)]) => {
+            &AvrInsn::Out(port, Reg(rr)) => {
                 let val = self.get_reg8(rr);
                 let call_stack = self.fmt_call_stack();
-                self.io_mem.set8(port, val, &call_stack, self.pc);
+                self.io_mem.set8(port as u32, val, &call_stack, self.pc);
             },
 
-            // TODO: default is lpm r0, Z. possibly disassembler shows
-            // operands anyway.
-            ("lpm", &[Operand::Reg(rd),
-                      Operand::MemAccess { reg: registers::Z, ofs: 0, postinc, predec: false }
-                      ]) => {
+            &AvrInsn::LpmZ(Reg(rd), mema) => {
 
-                let addr = self.get_reg16(registers::Z);
-                let val = self.prog_mem[addr as usize];
+                let addr = self.do_pre_mem_access(mema, false);
+
+                let val = self.get_prog_mem_byte(addr);
                 self.set_reg8(rd, val);
 
-                if postinc {
-                    self.set_reg16(registers::Z, addr + 1);
-                }
+                self.do_post_mem_access(mema, false);
             },
 
-            ("elpm", &[Operand::Reg(rd),
-                       Operand::MemAccess { reg: registers::Z, ofs: 0, postinc, predec: false }
-                       ]) => {
+            &AvrInsn::ElpmZ(Reg(rd), mema) => {
+                let addr = self.do_pre_mem_access(mema, true);
 
-                let addr = self.io_mem.get_full_z();
-                let val = self.prog_mem[addr as usize];
+                let val = self.get_prog_mem_byte(addr);
                 self.set_reg8(rd, val);
 
-                if postinc {
-                    self.io_mem.set_full_z(addr + 1);
-                }
+                self.do_post_mem_access(mema, true);
             },
 
-            ("ld", &[Operand::Reg(rd),
-                     Operand::MemAccess { reg, ofs, postinc, predec }])
-            | ("ldd", &[Operand::Reg(rd),
-                     Operand::MemAccess { reg, ofs, postinc, predec }])
-            => {
+            &AvrInsn::Ld(Reg(rd), mema) | &AvrInsn::Ldd(Reg(rd), mema) => {
+                let addr = self.do_pre_mem_access(mema, true);
 
-                let mut base_addr = self.io_mem.get_full_reg(reg);
-
-                if predec {
-                    base_addr -= 1;
-                }
-
-                // TODO: usize is the wrong size!
-                let addr = (base_addr as usize).wrapping_add(ofs as usize);
                 let call_stack = self.fmt_call_stack();
                 let val = self.io_mem.get8(addr, &call_stack, self.pc);
                 self.set_reg8(rd, val);
 
-                if postinc {
-                    base_addr += 1;
-                }
-
-                if predec || postinc {
-                    self.io_mem.set_full_reg(reg, base_addr);
-                }
+                self.do_post_mem_access(mema, true);
             },
 
-            ("st", &[Operand::MemAccess { reg, ofs, postinc, predec },
-                     Operand::Reg(rr)])
-            | ("std", &[Operand::MemAccess { reg, ofs, postinc, predec },
-                     Operand::Reg(rr)])
-            => {
+            &AvrInsn::St(mema, Reg(rr)) | &AvrInsn::Std(mema, Reg(rr)) => {
+                let addr = self.do_pre_mem_access(mema, true);
 
-                let mut base_addr = self.io_mem.get_full_reg(reg);
-
-                if predec {
-                    base_addr -= 1;
-                }
-
-                // TODO: usize is the wrong size!
-                let addr = (base_addr as usize).wrapping_add(ofs as usize);
                 let val = self.get_reg8(rr);
                 let call_stack = self.fmt_call_stack();
                 self.io_mem.set8(addr, val, &call_stack, self.pc);
 
-                if postinc {
-                    base_addr += 1;
-                }
-
-                if predec || postinc {
-                    self.io_mem.set_full_reg(reg, base_addr);
-                }
+                self.do_post_mem_access(mema, true);
             },
 
-            ("lds", &[Operand::Reg(rd), Operand::Imm(k)]) => {
+            &AvrInsn::Lds(Reg(rd), k) => {
                 let call_stack = self.fmt_call_stack();
-                let val = self.io_mem.get8(k as usize, &call_stack, self.pc);
+                let val = self.io_mem.get8(k as u32, &call_stack, self.pc);
                 self.set_reg8(rd, val);
             },
 
-            ("sts", &[Operand::Imm(k), Operand::Reg(rr)]) => {
+            &AvrInsn::Sts(k, Reg(rr)) => {
                 let val = self.get_reg8(rr);
                 let call_stack = self.fmt_call_stack();
-                self.io_mem.set8(k as usize, val, &call_stack, self.pc);
+                self.io_mem.set8(k as u32, val, &call_stack, self.pc);
             },
 
             _ => {
                 self.print_state();
                 panic!(
-                    "unimplemented opcode {} @ {:#x} after {} instructions",
-                    opcode, self.pc, self.insn_count);
+                    "unimplemented instruction {:?} @ {:#x} after {} instructions",
+                    insn, self.pc, self.insn_count);
             }
         }
     }
