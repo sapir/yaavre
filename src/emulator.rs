@@ -69,6 +69,14 @@ impl Emulator {
 
     fn get_prog_mem_byte(&self, addr: u32) -> u8 {
         let pmem_index = (addr / 2) as usize;
+
+        if pmem_index >= self.prog_mem.len() {
+            println!(
+                "WARNING: replacing pmem read from {:#x} @ {}; {:#x} with 0",
+                addr, self.fmt_call_stack(), self.pc);
+            return 0;
+        }
+
         let word = self.prog_mem[pmem_index];
 
         let mut bytes: [u8; 2] = [0; 2];
