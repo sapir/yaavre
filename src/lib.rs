@@ -10,6 +10,7 @@ extern crate signal_notify;
 pub mod registers;
 pub mod emulator;
 pub mod sreg;
+pub mod progmem;
 pub mod iomem;
 
 

@@ -1,16 +1,16 @@
 use std::fs::File;
 use std::io;
-use std::io::{Read, Cursor};
+use std::io::Read;
 use hex;
+use progmem::ProgramMemory;
 use iomem::IOMemory;
 use std::sync::mpsc;
 use signal_notify::{notify, Signal};
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use disa::{AvrInsn, Reg, RegPair, MemAccess, MemRegUpdate};
 
 
 pub struct Emulator {
-    pub prog_mem: Vec<u16>,
+    pub prog_mem: ProgramMemory,
     pub io_mem: IOMemory,
     pub pc: u32,
 
@@ -31,7 +31,7 @@ impl Emulator {
         let sig_chan = notify(&[Signal::USR1]);
 
         Emulator {
-            prog_mem: vec![0; 1 << (22 - 1)],
+            prog_mem: ProgramMemory::new(),
 
             io_mem: IOMemory::new(),
             pc: 0,
@@ -67,32 +67,8 @@ impl Emulator {
         format!("[{}]", frame_strings.join(", "))
     }
 
-    fn get_prog_mem_byte(&self, addr: u32) -> u8 {
-        let pmem_index = (addr / 2) as usize;
-
-        if pmem_index >= self.prog_mem.len() {
-            println!(
-                "WARNING: replacing pmem read from {:#x} @ {}; {:#x} with 0",
-                addr, self.fmt_call_stack(), self.pc);
-            return 0;
-        }
-
-        let word = self.prog_mem[pmem_index];
-
-        let mut bytes: [u8; 2] = [0; 2];
-        (&mut bytes[..]).write_u16::<LittleEndian>(word).unwrap();
-
-        bytes[(addr & 1) as usize]
-    }
-
-    fn get_insn_at(&self, addr: u32) -> Option<AvrInsn> {
-        let pmem_index = (addr / 2) as usize;
-        let decode_input = &self.prog_mem[pmem_index..];
-        AvrInsn::decode(decode_input).map(|(_, insn)| insn)
-    }
-
     fn get_cur_insn(&self) -> Option<AvrInsn> {
-        self.get_insn_at(self.pc)
+        self.prog_mem.get_insn_at(self.pc)
     }
 
     pub fn print_state(&self) {
@@ -153,10 +129,7 @@ impl Emulator {
         let mut buffer = vec![];
         f.read_to_end(&mut buffer)?;
 
-        self.prog_mem = vec![0; buffer.len() / 2];
-
-        let mut rdr = Cursor::new(buffer);
-        rdr.read_u16_into::<LittleEndian>(&mut self.prog_mem)?;
+        self.prog_mem.set_bytes(&buffer);
 
         Ok(())
     }
@@ -813,7 +786,9 @@ impl Emulator {
 
                 let addr = self.do_pre_mem_access(mema, false);
 
-                let val = self.get_prog_mem_byte(addr);
+                let call_stack = self.fmt_call_stack();
+                let val = self.prog_mem.get_prog_mem_byte(
+                    addr, &call_stack, self.pc);
                 self.set_reg8(rd, val);
 
                 self.do_post_mem_access(mema, false);
@@ -822,7 +797,9 @@ impl Emulator {
             &AvrInsn::ElpmZ(Reg(rd), mema) => {
                 let addr = self.do_pre_mem_access(mema, true);
 
-                let val = self.get_prog_mem_byte(addr);
+                let call_stack = self.fmt_call_stack();
+                let val = self.prog_mem.get_prog_mem_byte(
+                    addr, &call_stack, self.pc);
                 self.set_reg8(rd, val);
 
                 self.do_post_mem_access(mema, true);
