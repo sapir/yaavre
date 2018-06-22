@@ -139,7 +139,7 @@ impl IOMemory {
         self.data_mem[addr] = val;
     }
 
-    pub fn get8(&mut self, addr: usize) -> u8 {
+    pub fn get8(&mut self, addr: usize, call_stack: &str, pc: usize) -> u8 {
         match addr {
             // oscillator status = ready
             0x0051 => 0xff,
@@ -164,13 +164,14 @@ impl IOMemory {
             0x2000...0x1000000 => self._get8(addr),
 
             _ => {
-                println!("TODO: io read from {:#x}", addr);
+                println!("TODO: io read from {:#x} @ {}; {:#x}",
+                    addr, call_stack, pc);
                 0
             }
         }
     }
 
-    pub fn set8(&mut self, addr: usize, val: u8) {
+    pub fn set8(&mut self, addr: usize, val: u8, call_stack: &str, pc: usize) {
         match addr {
             0x08a0 => {
                 self.usart_output_log.push(val);
@@ -188,18 +189,20 @@ impl IOMemory {
             0x2000...0x1000000 => self._set8(addr, val),
 
             _ => {
-                println!("TODO: io write to {:#x} = {:#x}", addr, val);
+                println!("TODO: io write to {:#x} = {:#x} @ {}; {:#x}",
+                    addr, val, call_stack, pc);
             }
         }
     }
 
-    pub fn get16(&mut self, addr: usize) -> u16 {
-        ((self.get8(addr + 1) as u16) << 8) | (self.get8(addr) as u16)
+    pub fn get16(&mut self, addr: usize, call_stack: &str, pc: usize) -> u16 {
+        ((self.get8(addr + 1, call_stack, pc) as u16) << 8)
+          | (self.get8(addr, call_stack, pc) as u16)
     }
 
-    pub fn set16(&mut self, addr: usize, val: u16) {
-        self.set8(addr, (val & 0xff) as u8);
-        self.set8(addr + 1, ((val >> 8) & 0xff) as u8);
+    pub fn set16(&mut self, addr: usize, val: u16, call_stack: &str, pc: usize) {
+        self.set8(addr, (val & 0xff) as u8, call_stack, pc);
+        self.set8(addr + 1, ((val >> 8) & 0xff) as u8, call_stack, pc);
     }
 
     fn _get16(&self, addr: usize) -> u16 {

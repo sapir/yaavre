@@ -868,13 +868,15 @@ impl Emulator {
             },
 
             ("in", &[Operand::Reg(rd), Operand::Imm(port)]) => {
-                let val = self.io_mem.get8(port);
+                let call_stack = self.fmt_call_stack();
+                let val = self.io_mem.get8(port, &call_stack, self.pc);
                 self.set_reg8(rd, val);
             },
 
             ("out", &[Operand::Imm(port), Operand::Reg(rr)]) => {
                 let val = self.get_reg8(rr);
-                self.io_mem.set8(port, val);
+                let call_stack = self.fmt_call_stack();
+                self.io_mem.set8(port, val, &call_stack, self.pc);
             },
 
             // TODO: default is lpm r0, Z. possibly disassembler shows
@@ -919,7 +921,8 @@ impl Emulator {
 
                 // TODO: usize is the wrong size!
                 let addr = (base_addr as usize).wrapping_add(ofs as usize);
-                let val = self.io_mem.get8(addr);
+                let call_stack = self.fmt_call_stack();
+                let val = self.io_mem.get8(addr, &call_stack, self.pc);
                 self.set_reg8(rd, val);
 
                 if postinc {
@@ -946,7 +949,8 @@ impl Emulator {
                 // TODO: usize is the wrong size!
                 let addr = (base_addr as usize).wrapping_add(ofs as usize);
                 let val = self.get_reg8(rr);
-                self.io_mem.set8(addr, val);
+                let call_stack = self.fmt_call_stack();
+                self.io_mem.set8(addr, val, &call_stack, self.pc);
 
                 if postinc {
                     base_addr += 1;
@@ -958,13 +962,15 @@ impl Emulator {
             },
 
             ("lds", &[Operand::Reg(rd), Operand::Imm(k)]) => {
-                let val = self.io_mem.get8(k as usize);
+                let call_stack = self.fmt_call_stack();
+                let val = self.io_mem.get8(k as usize, &call_stack, self.pc);
                 self.set_reg8(rd, val);
             },
 
             ("sts", &[Operand::Imm(k), Operand::Reg(rr)]) => {
                 let val = self.get_reg8(rr);
-                self.io_mem.set8(k as usize, val);
+                let call_stack = self.fmt_call_stack();
+                self.io_mem.set8(k as usize, val, &call_stack, self.pc);
             },
 
             _ => {
