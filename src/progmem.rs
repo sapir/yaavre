@@ -1,6 +1,6 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Result};
-use disa::AvrInsn;
+use disa::{AvrInsn, AvrDisassembler};
 
 
 pub struct ProgramMemory {
@@ -43,5 +43,19 @@ impl ProgramMemory {
         let pmem_index = (addr / 2) as usize;
         let decode_input = &self.words[pmem_index..];
         AvrInsn::decode(decode_input).map(|(_, insn)| insn)
+    }
+
+    pub fn get_insns_at(&self, start: u32, end: u32) -> AvrDisassembler {
+        let start_index = (start / 2) as usize;
+        let end_index = (end / 2) as usize;
+        let disasm_input = &self.words[start_index..end_index];
+        AvrDisassembler::new(start, disasm_input)
+    }
+
+    /// like get_insns_at, but with an inclusive [start, end] range
+    pub fn get_insns_at_incl(&self, start: u32, end: u32) -> AvrDisassembler {
+        let last_insn = self.get_insn_at(end).unwrap();
+
+        self.get_insns_at(start, end + (last_insn.byte_size() as u32))
     }
 }
