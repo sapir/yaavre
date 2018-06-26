@@ -1,11 +1,11 @@
 pub struct RegisterFile {
-    pub r: Vec<u8>,
+    pub r: [u8; 32],
 }
 
 impl RegisterFile {
     pub fn new() -> RegisterFile {
         RegisterFile {
-            r: vec![0; 32],
+            r: [0; 32],
         }
     }
 
