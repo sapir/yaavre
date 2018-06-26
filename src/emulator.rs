@@ -352,10 +352,6 @@ impl Emulator {
         }
     }
 
-    fn get_rel_jmp_target(&self, next_pc: u32, ofs: i16) -> u32 {
-        next_pc.wrapping_add(ofs as i32 as u32)
-    }
-
     fn do_opcode(&mut self, insn: &AvrInsn, next_pc: &mut u32) {
         match insn {
             &AvrInsn::Nop => {},
@@ -368,7 +364,7 @@ impl Emulator {
                     self.halted = true;
                 }
 
-                *next_pc = self.get_rel_jmp_target(*next_pc, ofs);
+                *next_pc = AvrInsn::get_rel_jmp_target(*next_pc, ofs);
             }
 
             &AvrInsn::Eijmp => *next_pc = self.io_mem.get_full_ind() << 1,
@@ -377,7 +373,7 @@ impl Emulator {
                 self.do_call(next_pc, tgt),
 
             &AvrInsn::Rcall(ofs) => {
-                let tgt = self.get_rel_jmp_target(*next_pc, ofs);
+                let tgt = AvrInsn::get_rel_jmp_target(*next_pc, ofs);
                 self.do_call(next_pc, tgt);
             },
 
@@ -405,52 +401,62 @@ impl Emulator {
 
             &AvrInsn::Breq(ofs) =>
                 if self.io_mem.sreg.z {
-                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
+                    *next_pc = AvrInsn::get_rel_jmp_target(
+                        *next_pc, ofs.into());
                 },
 
             &AvrInsn::Brne(ofs) =>
                 if !self.io_mem.sreg.z {
-                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
+                    *next_pc = AvrInsn::get_rel_jmp_target(
+                        *next_pc, ofs.into());
                 },
 
             &AvrInsn::Brcc(ofs) =>
                 if !self.io_mem.sreg.c {
-                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
+                    *next_pc = AvrInsn::get_rel_jmp_target(
+                        *next_pc, ofs.into());
                 },
 
             &AvrInsn::Brcs(ofs) =>
                 if self.io_mem.sreg.c {
-                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
+                    *next_pc = AvrInsn::get_rel_jmp_target(
+                        *next_pc, ofs.into());
                 },
 
             &AvrInsn::Brge(ofs) =>
                 if !(self.io_mem.sreg.n ^ self.io_mem.sreg.v) {
-                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
+                    *next_pc = AvrInsn::get_rel_jmp_target(
+                        *next_pc, ofs.into());
                 },
 
             &AvrInsn::Brlt(ofs) =>
                 if self.io_mem.sreg.n ^ self.io_mem.sreg.v {
-                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
+                    *next_pc = AvrInsn::get_rel_jmp_target(
+                        *next_pc, ofs.into());
                 },
 
             &AvrInsn::Brmi(ofs) =>
                 if self.io_mem.sreg.n {
-                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
+                    *next_pc = AvrInsn::get_rel_jmp_target(
+                        *next_pc, ofs.into());
                 },
 
             &AvrInsn::Brpl(ofs) =>
                 if !self.io_mem.sreg.n {
-                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
+                    *next_pc = AvrInsn::get_rel_jmp_target(
+                        *next_pc, ofs.into());
                 },
 
             &AvrInsn::Brtc(ofs) =>
                 if !self.io_mem.sreg.t {
-                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
+                    *next_pc = AvrInsn::get_rel_jmp_target(
+                        *next_pc, ofs.into());
                 },
 
             &AvrInsn::Brts(ofs) =>
                 if self.io_mem.sreg.t {
-                    *next_pc = self.get_rel_jmp_target(*next_pc, ofs.into());
+                    *next_pc = AvrInsn::get_rel_jmp_target(
+                        *next_pc, ofs.into());
                 },
 
             &AvrInsn::Sbrc(Reg(rr), bit) => {
